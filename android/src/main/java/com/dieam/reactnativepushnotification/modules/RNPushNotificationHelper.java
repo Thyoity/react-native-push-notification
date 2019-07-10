@@ -16,10 +16,11 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.media.RingtoneManager;
+import android.media.AudioAttributes;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.support.v4.app.NotificationCompat;
+import androidx.core.app.NotificationCompat;
 import android.util.Log;
 
 import com.facebook.react.bridge.ReadableMap;
@@ -28,6 +29,9 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.GregorianCalendar;
 
 import static com.dieam.reactnativepushnotification.modules.RNPushNotification.LOG_TAG;
 import static com.dieam.reactnativepushnotification.modules.RNPushNotificationAttributes.fromJson;
@@ -36,6 +40,7 @@ public class RNPushNotificationHelper {
     public static final String PREFERENCES_KEY = "rn_push_notification";
     private static final long DEFAULT_VIBRATION = 300L;
     private static final String NOTIFICATION_CHANNEL_ID = "rn-push-notification-channel-id";
+    private static String NOTIFICATION_CHANNEL_ID_TMP = null;
 
     private Context context;
     private RNPushNotificationConfig config;
@@ -205,12 +210,19 @@ public class RNPushNotificationHelper {
                 }
             }
 
-            NotificationCompat.Builder notification = new NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+            NOTIFICATION_CHANNEL_ID_TMP = ""+ NOTIFICATION_CHANNEL_ID;
+
+            NotificationCompat.Builder notification = new NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID_TMP)
                     .setContentTitle(title)
                     .setTicker(bundle.getString("ticker"))
                     .setVisibility(visibility)
                     .setPriority(priority)
                     .setAutoCancel(bundle.getBoolean("autoCancel", true));
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { // API 26 and higher
+                // Changing Default mode of notification
+                notification.setDefaults(Notification.DEFAULT_LIGHTS);
+            }
 
             String group = bundle.getString("group");
             if (group != null) {
@@ -277,8 +289,9 @@ public class RNPushNotificationHelper {
             bundle.putBoolean("userInteraction", true);
             intent.putExtra("notification", bundle);
 
+            Uri soundUri = null;
             if (!bundle.containsKey("playSound") || bundle.getBoolean("playSound")) {
-                Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+                soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
                 String soundName = bundle.getString("soundName");
                 if (soundName != null) {
                     if (!"default".equalsIgnoreCase(soundName)) {
@@ -296,9 +309,18 @@ public class RNPushNotificationHelper {
                         }
 
                         soundUri = Uri.parse("android.resource://" + context.getPackageName() + "/" + resId);
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { // API 26 and higher
+                            NOTIFICATION_CHANNEL_ID_TMP = NOTIFICATION_CHANNEL_ID +"-"+ soundName;
+                            notification.setChannelId(NOTIFICATION_CHANNEL_ID_TMP);
+                        }
                     }
                 }
                 notification.setSound(soundUri);
+            }
+
+            if (soundUri == null || Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                notification.setSound(null);
             }
 
             if (bundle.containsKey("ongoing") || bundle.getBoolean("ongoing")) {
@@ -323,7 +345,7 @@ public class RNPushNotificationHelper {
                     PendingIntent.FLAG_UPDATE_CURRENT);
 
             NotificationManager notificationManager = notificationManager();
-            checkOrCreateChannel(notificationManager);
+            checkOrCreateChannel(notificationManager, soundUri);
 
             notification.setContentIntent(pendingIntent);
 
@@ -410,7 +432,7 @@ public class RNPushNotificationHelper {
         if (repeatType != null) {
             long fireDate = (long) bundle.getDouble("fireDate");
 
-            boolean validRepeatType = Arrays.asList("time", "week", "day", "hour", "minute").contains(repeatType);
+            boolean validRepeatType = Arrays.asList("time", "month", "week", "day", "hour", "minute").contains(repeatType);
 
             // Sanity checks
             if (!validRepeatType) {
@@ -429,6 +451,26 @@ public class RNPushNotificationHelper {
             switch (repeatType) {
                 case "time":
                     newFireDate = fireDate + repeatTime;
+                    break;
+                case "month":
+                    final Calendar fireDateCalendar = new GregorianCalendar();
+                    fireDateCalendar.setTime(new Date(fireDate));
+                    final int fireDay = fireDateCalendar.get(Calendar.DAY_OF_MONTH);
+                    final int fireMinute = fireDateCalendar.get(Calendar.MINUTE);
+                    final int fireHour = fireDateCalendar.get(Calendar.HOUR_OF_DAY);
+
+                    final Calendar nextEvent = new GregorianCalendar();
+                    nextEvent.setTime(new Date());
+                    final int currentMonth = nextEvent.get(Calendar.MONTH);
+                    int nextMonth = currentMonth < 11 ? (currentMonth + 1) : 0;
+                    nextEvent.set(Calendar.YEAR, nextEvent.get(Calendar.YEAR) + (nextMonth == 0 ? 1 : 0));
+                    nextEvent.set(Calendar.MONTH, nextMonth);
+                    final int maxDay = nextEvent.getActualMaximum(Calendar.DAY_OF_MONTH);
+                    nextEvent.set(Calendar.DAY_OF_MONTH, fireDay <= maxDay ? fireDay : maxDay);
+                    nextEvent.set(Calendar.HOUR_OF_DAY, fireHour);
+                    nextEvent.set(Calendar.MINUTE, fireMinute);
+                    nextEvent.set(Calendar.SECOND, 0);
+                    newFireDate = nextEvent.getTimeInMillis();
                     break;
                 case "week":
                     newFireDate = fireDate + 7 * ONE_DAY;
@@ -527,11 +569,8 @@ public class RNPushNotificationHelper {
         }
     }
 
-    private static boolean channelCreated = false;
-    private void checkOrCreateChannel(NotificationManager manager) {
+    private void checkOrCreateChannel(NotificationManager manager, Uri soundUri) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O)
-            return;
-        if (channelCreated)
             return;
         if (manager == null)
             return;
@@ -569,12 +608,22 @@ public class RNPushNotificationHelper {
             }
         }
 
-        NotificationChannel channel = new NotificationChannel(NOTIFICATION_CHANNEL_ID, this.config.getChannelName(), importance);
-        channel.setDescription(this.config.getChannelDescription());
-        channel.enableLights(true);
-        channel.enableVibration(true);
+        NotificationChannel channel = manager.getNotificationChannel(NOTIFICATION_CHANNEL_ID_TMP);
 
-        manager.createNotificationChannel(channel);
-        channelCreated = true;
+        if (channel == null) {
+            channel = new NotificationChannel(NOTIFICATION_CHANNEL_ID_TMP, this.config.getChannelName(), NotificationManager.IMPORTANCE_DEFAULT);
+            channel.enableLights(true);
+            channel.enableVibration(true);
+            if (soundUri != null) {
+                AudioAttributes audioAttributes = new AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .build();
+                channel.setSound(soundUri, audioAttributes);
+            } else {
+                channel.setSound(null, null);
+            }
+            manager.createNotificationChannel(channel);
+        }
     }
 }
